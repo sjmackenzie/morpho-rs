@@ -44,6 +44,29 @@ pub struct Output {
 
 // ============= CORE LOGIC (NO I/O) =============
 pub fn load_project(dir: &str) -> Result<Project, String> {
+    load_project_with_blacklist(dir, &[])
+}
+
+pub fn load_multiple_projects(dirs: &[String], blacklist: &[String]) -> Result<Project, String> {
+    let mut merged = Project {
+        functions: HashMap::new(),
+        types: HashMap::new(),
+    };
+
+    for dir in dirs {
+        let project = load_project_with_blacklist(dir, blacklist)?;
+
+        // Merge functions (later entries override earlier ones if there are conflicts)
+        merged.functions.extend(project.functions);
+
+        // Merge types
+        merged.types.extend(project.types);
+    }
+
+    Ok(merged)
+}
+
+pub fn load_project_with_blacklist(dir: &str, blacklist: &[String]) -> Result<Project, String> {
     let mut project = Project {
         functions: HashMap::new(),
         types: HashMap::new(),
@@ -54,7 +77,22 @@ pub fn load_project(dir: &str) -> Result<Project, String> {
             Ok(e) => e,
             Err(_) => continue,
         };
+
+        // Skip blacklisted directories
+        if entry.file_type().is_dir() {
+            let path_str = entry.path().to_string_lossy();
+            if blacklist.iter().any(|bl| path_str.contains(bl)) {
+                continue;
+            }
+        }
+
         if !entry.file_type().is_file() || entry.path().extension().map_or(false, |e| e != "rs") {
+            continue;
+        }
+
+        // Skip files in blacklisted paths
+        let path_str = entry.path().to_string_lossy();
+        if blacklist.iter().any(|bl| path_str.contains(bl)) {
             continue;
         }
 
@@ -240,7 +278,42 @@ fn _trace_calls(
 }
 
 pub fn generate_output(dir: &str, mode: OutputMode) -> Result<Output, String> {
-    let project = load_project(dir)?;
+    generate_output_with_blacklist(dir, mode, &[])
+}
+
+pub fn generate_output_multi_dir(dirs: &[String], mode: OutputMode, blacklist: &[String]) -> Result<Output, String> {
+    let project = load_multiple_projects(dirs, blacklist)?;
+
+    match mode {
+        OutputMode::ListAll { visibility } => generate_list_all(&project, visibility),
+        OutputMode::CallGraph { root, visibility } => {
+            let (visited_funcs, reachable_types) = trace_calls(&root, &project)?;
+
+            // Filter functions and types by reachability
+            let mut file_to_funcs: HashMap<String, Vec<Function>> = HashMap::new();
+            for (name, func) in &project.functions {
+                if visited_funcs.contains(name) {
+                    let file = find_file_for_function(&func.qualified_name, &project)?;
+                    file_to_funcs.entry(file).or_default().push(func.clone());
+                }
+            }
+
+            let mut file_to_types: HashMap<String, Vec<Item>> = HashMap::new();
+            for (type_name, (_, item)) in &project.types {
+                if reachable_types.contains(type_name) {
+                    let (file_path, _) = project.types.get(type_name).unwrap();
+                    file_to_types.entry(file_path.clone()).or_default().push(item.clone());
+                }
+            }
+
+            generate_call_graph_output(&file_to_funcs, &file_to_types, visibility, Some(&root))
+        }
+        OutputMode::Source { function } => generate_source(&project, &function),
+    }
+}
+
+pub fn generate_output_with_blacklist(dir: &str, mode: OutputMode, blacklist: &[String]) -> Result<Output, String> {
+    let project = load_project_with_blacklist(dir, blacklist)?;
 
     match mode {
         OutputMode::ListAll { visibility } => generate_list_all(&project, visibility),
@@ -272,30 +345,94 @@ pub fn generate_output(dir: &str, mode: OutputMode) -> Result<Output, String> {
 
 // === INTERNAL HELPERS (no I/O) ===
 
-fn generate_source(project: &Project, function_name: &str) -> Result<Output, String> {
-    // Try to find the function
-    let func = project.functions.get(function_name).or_else(|| {
-        // Try suffix match
+fn generate_source(project: &Project, name: &str) -> Result<Output, String> {
+    // Extract just the item name (last component after ::)
+    let simple_name = name.split("::").last().unwrap_or(name);
+
+    // Try to find as a function first
+    let func = project.functions.get(name).or_else(|| {
+        // Try suffix match with simple name
         project.functions.iter()
-            .find(|(qn, _)| qn.ends_with(&format!("::{}", function_name)))
+            .find(|(qn, _)| {
+                qn.ends_with(&format!("::{}", simple_name)) ||
+                qn == &simple_name
+            })
+            .map(|(_, f)| f)
+    }).or_else(|| {
+        // Try matching by converting absolute paths to relative or vice versa
+        project.functions.iter()
+            .find(|(qn, _)| paths_match(qn, name))
             .map(|(_, f)| f)
     });
 
-    let func = match func {
-        Some(f) => f,
-        None => return Err(format!("Function '{}' not found", function_name)),
-    };
+    if let Some(func) = func {
+        let mut output = String::new();
+        let file_path = find_file_for_function(&func.qualified_name, project)?;
+        output.push_str(&format!("=== {} ===\n", file_path));
+        output.push_str(&format_function_source(func));
+        return Ok(Output { content: output });
+    }
 
-    let mut output = String::new();
+    // Not a function, try to find as a type
+    let type_result = project.types.get(name).or_else(|| {
+        // Try suffix match with simple name
+        project.types.iter()
+            .find(|(qn, _)| {
+                qn.ends_with(&format!("::{}", simple_name)) ||
+                *qn == simple_name
+            })
+            .map(|(_, pair)| pair)
+    }).or_else(|| {
+        // Try matching by path normalization
+        project.types.iter()
+            .find(|(qn, _)| paths_match(qn, name))
+            .map(|(_, pair)| pair)
+    });
 
-    // Get file path for header
-    let file_path = find_file_for_function(&func.qualified_name, project)?;
-    output.push_str(&format!("=== {} ===\n", file_path));
+    if let Some((file_path, item)) = type_result {
+        let mut output = String::new();
+        output.push_str(&format!("=== {} ===\n", file_path));
+        output.push_str(&format!("{}\n", item.to_token_stream()));
+        return Ok(Output { content: output });
+    }
 
-    // Output the function with properly formatted source
-    output.push_str(&format_function_source(func));
+    Err(format!("Function or type '{}' not found. Use list_rust_items to see available items.", name))
+}
 
-    Ok(Output { content: output })
+// Helper to check if two qualified names refer to the same item
+// Handles cases where one is absolute and one is relative
+fn paths_match(stored_qn: &str, search_qn: &str) -> bool {
+    // If they're exactly equal, match
+    if stored_qn == search_qn {
+        return true;
+    }
+
+    // Extract file path and item name from both
+    let stored_parts: Vec<&str> = stored_qn.splitn(2, "::").collect();
+    let search_parts: Vec<&str> = search_qn.splitn(2, "::").collect();
+
+    if stored_parts.len() != 2 || search_parts.len() != 2 {
+        return false;
+    }
+
+    let stored_file = stored_parts[0];
+    let stored_item = stored_parts[1];
+    let search_file = search_parts[0];
+    let search_item = search_parts[1];
+
+    // Items must match exactly
+    if stored_item != search_item {
+        return false;
+    }
+
+    // Check if the file paths refer to the same file
+    // Handle both relative (./path) and absolute (/full/path) paths
+    let stored_normalized = stored_file.trim_start_matches("./");
+    let search_normalized = search_file.trim_start_matches("./");
+
+    // Check if one ends with the other (handles absolute vs relative)
+    stored_normalized.ends_with(search_normalized) ||
+    search_normalized.ends_with(stored_normalized)
 }
 
 fn format_function_source(func: &Function) -> String {

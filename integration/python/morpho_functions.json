@@ -1,0 +1,74 @@
+{
+  "functions": [
+    {
+      "name": "list_rust_items",
+      "description": "List all types and functions in the Rust project",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "public_only": {
+            "type": "boolean",
+            "description": "Only show public API items (reduces token usage)",
+            "default": false
+          },
+          "blacklist": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Directories to exclude (e.g., ['target', 'tests'])",
+            "default": []
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "analyze_rust_callgraph",
+      "description": "Generate a call graph showing what functions are called by a given Rust function. Shows hierarchical tree structure with context annotations.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "function": {
+            "type": "string",
+            "description": "Fully qualified function name (e.g., './src/lib.rs::generate_output') or short name (e.g., 'generate_output')"
+          },
+          "public_only": {
+            "type": "boolean",
+            "description": "Only show public functions (reduces token usage)",
+            "default": false
+          },
+          "blacklist": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          }
+        },
+        "required": ["function"]
+      }
+    },
+    {
+      "name": "get_rust_source",
+      "description": "Get the formatted source code of a specific Rust function",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "function": {
+            "type": "string",
+            "description": "Fully qualified function name or short name"
+          },
+          "blacklist": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          }
+        },
+        "required": ["function"]
+      }
+    }
+  ]
+}

@@ -42,6 +42,18 @@ morpho-rs-cli /path/to/rust/project
 morpho-rs-cli /path/to/rust/project --public-only
 ```
 
+**Exclude directories** (e.g., skip generated code, tests, benchmarks):
+
+```bash
+morpho-rs-cli /path/to/rust/project --blacklist target,tests,benches
+```
+
+**Combine filters**:
+
+```bash
+morpho-rs-cli /path/to/rust/project --public-only --blacklist target,examples
+```
+
 **Output:**
 ```
 === ./src/lib.rs ===
@@ -119,19 +131,77 @@ The `morpho-rs-agent` runs an HTTP server that exposes the analysis tools via RE
 ### Starting the Agent
 
 ```bash
-# Run the agent (listens on http://127.0.0.1:8080)
+# Run the agent in the current directory (listens on http://127.0.0.1:8080)
+morpho-rs-agent
+
+# Specify a single project directory
+morpho-rs-agent /path/to/your/rust/project
+
+# Analyze multiple directories (e.g., main project + dependencies)
+morpho-rs-agent /path/to/main/project /path/to/dependency1 /path/to/dependency2
+
+# Or use environment variable (colon-separated paths)
+export MORPHO_PROJECT_DIRS="/path/to/project:/path/to/dep1:/path/to/dep2"
 morpho-rs-agent
 ```
 
 **Output:**
 ```
 🚀 morpho-rs-agent (HTTP) listening on http://127.0.0.1:8080
+   Project directories: /path/to/project, /path/to/dep1
    /tool/generate_call_graph - Generate call graph from a function
    /tool/get_source          - Get source code of a function
    /tool/list_all            - List all types and functions in project
 ```
 
+**Multi-Directory Support:**
+
+The agent can analyze multiple Rust projects simultaneously, which is useful for:
+- Including local dependencies in analysis
+- Tracing function calls across crate boundaries
+- Analyzing workspace members together
+
+Priority order for directory configuration:
+1. **Command-line arguments** - All arguments after the program name
+2. **Environment variable** - `MORPHO_PROJECT_DIRS` (colon-separated)
+3. **Current directory** - Falls back to `.` if nothing is specified
+
 ### API Endpoints
+
+#### 0. Get Project Information
+
+**Endpoint:** `GET /info`
+
+**Response:**
+```json
+{
+  "primary_project": {
+    "name": "sio",
+    "path": "/Users/rivergod/dev/sio"
+  },
+  "dependencies": [
+    {
+      "name": "gpui-component",
+      "path": "/Users/rivergod/dev/gpui-component"
+    },
+    {
+      "name": "werbolg",
+      "path": "/Users/rivergod/dev/werbolg"
+    }
+  ]
+}
+```
+
+**Description:**
+Returns information about the primary project and its dependencies. This endpoint:
+- Identifies which directory is the primary project (the first one passed to `morpho-rs-agent`)
+- Lists all dependency directories
+- Provides short names that can be used in the `directory` parameter of other endpoints
+
+**cURL Example:**
+```bash
+curl http://127.0.0.1:8080/info
+```
 
 #### 1. List All Items
 
@@ -140,9 +210,20 @@ morpho-rs-agent
 **Request Body:**
 ```json
 {
-  "public_only": false
+  "public_only": false,
+  "blacklist": ["target", "tests", "benches"],
+  "directory": "/path/to/specific/codebase"
 }
 ```
+
+**Parameters:**
+- `public_only` (optional, boolean): Only show public items
+- `blacklist` (optional, array of strings): Directories/paths to exclude
+- `directory` (optional, string): Filter to specific project or subdirectory. Examples:
+  - `"gpui-component"` - entire project
+  - `"gpui-component/crates/ui/src/button"` - specific subdirectory
+  - `"sio/src"` - subdirectory within sio project
+  - Use `GET /info` to see top-level projects. If not specified, searches all configured directories
 
 **Response:**
 ```json
@@ -166,9 +247,20 @@ curl -X POST http://127.0.0.1:8080/tool/list_all \
 ```json
 {
   "root_function": "./src/lib.rs::generate_output",
-  "public_only": false
+  "public_only": false,
+  "blacklist": ["target", "tests"],
+  "directory": "/path/to/specific/codebase"
 }
 ```
+
+**Parameters:**
+- `root_function` (required, string): Function to analyze
+- `public_only` (optional, boolean): Only show public functions
+- `blacklist` (optional, array of strings): Directories/paths to exclude
+- `directory` (optional, string): Filter to specific project or subdirectory. Examples:
+  - `"gpui-component"` - entire project
+  - `"gpui-component/crates/ui"` - specific subdirectory
+  - Use `GET /info` to see top-level projects. If not specified, searches all configured directories
 
 **Response:**
 ```json
@@ -184,16 +276,28 @@ curl -X POST http://127.0.0.1:8080/tool/generate_call_graph \
   -d '{"root_function": "./src/lib.rs::generate_output", "public_only": false}'
 ```
 
-#### 3. Get Function Source
+#### 3. Get Function or Type Source
 
 **Endpoint:** `POST /tool/get_source`
 
 **Request Body:**
 ```json
 {
-  "function": "./src/lib.rs::generate_output"
+  "function": "./src/lib.rs::generate_output",
+  "blacklist": ["target"],
+  "directory": "/path/to/specific/codebase"
 }
 ```
+
+**Parameters:**
+- `function` (required, string): Function or type name to retrieve source for (e.g., `"Button"`, `"main"`, `"./src/lib.rs::Button"`)
+- `blacklist` (optional, array of strings): Directories/paths to exclude
+- `directory` (optional, string): Filter to specific project or subdirectory. Examples:
+  - `"gpui-component"` - entire project
+  - `"gpui-component/crates/ui"` - specific subdirectory
+  - Use `GET /info` to see top-level projects. If not specified, searches all configured directories
+
+**Note:** This endpoint works for both functions and types (structs, enums, etc.). It will search for functions first, then types if no function is found.
 
 **Response:**
 ```json
@@ -211,375 +315,119 @@ curl -X POST http://127.0.0.1:8080/tool/get_source \
 
 ## Integration with AI Coding Tools
 
-### Claude Code Integration
+The `morpho-rs-agent` HTTP server can be integrated with various AI coding assistants. Pre-built integration scripts are available in the `integration/` directory.
 
-Claude Code supports custom MCP (Model Context Protocol) servers. Here's how to integrate morpho-rs:
+### Quick Start
 
-#### 1. Create MCP Server Wrapper
+1. **Start the agent** in your Rust project directory:
+```bash
+cd /path/to/your/rust/project
+morpho-rs-agent
 
-Create a file `morpho-mcp-server.js`:
-
-```javascript
-#!/usr/bin/env node
-const http = require('http');
-const { spawn } = require('child_process');
-
-// Start morpho-rs-agent
-const agent = spawn('./target/release/morpho-rs-agent');
-
-agent.stdout.on('data', (data) => console.error(`Agent: ${data}`));
-agent.stderr.on('data', (data) => console.error(`Agent Error: ${data}`));
-
-// MCP Server implementation
-const server = http.createServer(async (req, res) => {
-  if (req.method === 'POST' && req.url === '/mcp') {
-    let body = '';
-    req.on('data', chunk => body += chunk);
-    req.on('end', async () => {
-      const mcpRequest = JSON.parse(body);
-
-      // Map MCP tool calls to morpho-rs agent
-      let morphoEndpoint, morphoBody;
-
-      if (mcpRequest.method === 'tools/call' && mcpRequest.params.name === 'list_rust_items') {
-        morphoEndpoint = '/tool/list_all';
-        morphoBody = JSON.stringify({
-          public_only: mcpRequest.params.arguments.public_only || false
-        });
-      } else if (mcpRequest.method === 'tools/call' && mcpRequest.params.name === 'analyze_rust_callgraph') {
-        morphoEndpoint = '/tool/generate_call_graph';
-        morphoBody = JSON.stringify({
-          root_function: mcpRequest.params.arguments.function,
-          public_only: mcpRequest.params.arguments.public_only || false
-        });
-      } else if (mcpRequest.method === 'tools/call' && mcpRequest.params.name === 'get_rust_source') {
-        morphoEndpoint = '/tool/get_source';
-        morphoBody = JSON.stringify({
-          function: mcpRequest.params.arguments.function
-        });
-      }
-
-      // Forward to morpho-rs-agent
-      const options = {
-        hostname: '127.0.0.1',
-        port: 8080,
-        path: morphoEndpoint,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      };
-
-      const agentReq = http.request(options, (agentRes) => {
-        let data = '';
-        agentRes.on('data', chunk => data += chunk);
-        agentRes.on('end', () => {
-          const response = JSON.parse(data);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            jsonrpc: '2.0',
-            id: mcpRequest.id,
-            result: { content: [{ type: 'text', text: response.result }] }
-          }));
-        });
-      });
-
-      agentReq.write(morphoBody);
-      agentReq.end();
-    });
-  }
-});
-
-server.listen(3000, () => {
-  console.log('MCP Server listening on port 3000');
-});
+# Or specify multiple directories to include dependencies:
+morpho-rs-agent /path/to/main/project /path/to/local/dependency
 ```
 
-#### 2. Configure Claude Code
+2. **Choose your AI tool** and follow the setup instructions below
 
-Add to your Claude Code settings (`.claude/config.json`):
+### Supported Integrations
 
-```json
-{
-  "mcpServers": {
-    "morpho-rs": {
-      "command": "node",
-      "args": ["/path/to/morpho-mcp-server.js"]
-    }
-  }
+#### Claude Code (MCP)
+Uses Model Context Protocol for seamless integration.
+
+**Setup:**
+```bash
+cd integration/javascript
+chmod +x claude_mcp_server.js
+
+# Add to .claude/config.json:
+# {
+#   "mcpServers": {
+#     "morpho-rs": {
+#       "command": "/absolute/path/to/integration/javascript/claude_mcp_server.js"
+#     }
+#   }
+# }
+```
+
+See [`integration/javascript/README.md`](integration/javascript/README.md) for details.
+
+#### LM Studio 3+
+Uses MCP (Model Context Protocol).
+
+**Setup:**
+```bash
+cd integration/javascript
+chmod +x lm_studio_mcp_server.js
+
+# Add to LM Studio MCP settings:
+# {
+#   "mcpServers": {
+#     "morpho-rs": {
+#       "command": "/absolute/path/to/integration/javascript/lm_studio_mcp_server.js"
+#     }
+#   }
+# }
+```
+
+See [`integration/javascript/README.md`](integration/javascript/README.md) for details.
+
+**Note:** For older LM Studio versions (pre-v3), use the Python function calling integration in [`integration/python/README.md`](integration/python/README.md).
+
+#### Qwen Coder
+Direct tool integration via OpenAI-compatible API.
+
+**Setup:**
+```bash
+cd integration/python
+pip install openai requests
+python qwen_tools.py
+```
+
+See [`integration/python/README.md`](integration/python/README.md) for details.
+
+### Custom Integration (Rust)
+
+For integrating into your own Rust application:
+
+```rust
+use reqwest;
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+
+    // List all public items
+    let res = client
+        .post("http://127.0.0.1:8080/tool/list_all")
+        .json(&json!({
+            "public_only": true,
+            "blacklist": ["target", "tests"]
+        }))
+        .send()
+        .await?;
+
+    println!("{}", res.json::<serde_json::Value>().await?["result"]);
+    Ok(())
 }
 ```
 
-#### 3. Usage in Claude Code
-
-Now you can ask Claude:
-
-```
-"Analyze the call graph for the generate_output function"
-```
-
-Claude will use the MCP server to call morpho-rs automatically.
-
-### LM Studio Integration
-
-LM Studio supports OpenAPI function calling. Here's how to set it up:
-
-#### 1. Create OpenAPI Function Definitions
-
-Save this as `morpho-functions.json`:
-
-```json
-{
-  "functions": [
-    {
-      "name": "list_rust_items",
-      "description": "List all types and functions in the Rust project",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "public_only": {
-            "type": "boolean",
-            "description": "Only show public API items (reduces token usage)",
-            "default": false
-          }
-        },
-        "required": []
-      }
-    },
-    {
-      "name": "analyze_rust_callgraph",
-      "description": "Generate a call graph showing what functions are called by a given Rust function. Shows hierarchical tree structure with context annotations.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "function": {
-            "type": "string",
-            "description": "Fully qualified function name (e.g., './src/lib.rs::generate_output') or short name (e.g., 'generate_output')"
-          },
-          "public_only": {
-            "type": "boolean",
-            "description": "Only show public functions (reduces token usage)",
-            "default": false
-          }
-        },
-        "required": ["function"]
-      }
-    },
-    {
-      "name": "get_rust_source",
-      "description": "Get the formatted source code of a specific Rust function",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "function": {
-            "type": "string",
-            "description": "Fully qualified function name or short name"
-          }
-        },
-        "required": ["function"]
-      }
-    }
-  ]
-}
+**Dependencies:**
+```toml
+reqwest = { version = "0.11", features = ["json"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
 ```
 
-#### 2. Create Function Handler Script
+### Other AI Tools
 
-Save as `morpho-lm-handler.py`:
+Most AI coding assistants can call HTTP endpoints directly. Point them to:
+- `POST http://127.0.0.1:8080/tool/list_all`
+- `POST http://127.0.0.1:8080/tool/generate_call_graph`
+- `POST http://127.0.0.1:8080/tool/get_source`
 
-```python
-#!/usr/bin/env python3
-import json
-import requests
-import sys
-
-def handle_function_call(function_name, arguments):
-    base_url = "http://127.0.0.1:8080"
-
-    if function_name == "list_rust_items":
-        response = requests.post(
-            f"{base_url}/tool/list_all",
-            json={"public_only": arguments.get("public_only", False)}
-        )
-    elif function_name == "analyze_rust_callgraph":
-        response = requests.post(
-            f"{base_url}/tool/generate_call_graph",
-            json={
-                "root_function": arguments["function"],
-                "public_only": arguments.get("public_only", False)
-            }
-        )
-    elif function_name == "get_rust_source":
-        response = requests.post(
-            f"{base_url}/tool/get_source",
-            json={"function": arguments["function"]}
-        )
-    else:
-        return {"error": f"Unknown function: {function_name}"}
-
-    if response.status_code == 200:
-        return response.json()
-    else:
-        return {"error": f"HTTP {response.status_code}: {response.text}"}
-
-if __name__ == "__main__":
-    input_data = json.loads(sys.stdin.read())
-    result = handle_function_call(input_data["name"], input_data["arguments"])
-    print(json.dumps(result))
-```
-
-#### 3. Configure LM Studio
-
-1. Start `morpho-rs-agent`
-2. In LM Studio → Settings → Functions:
-   - Enable "Function Calling"
-   - Load `morpho-functions.json`
-   - Set handler script to `morpho-lm-handler.py`
-
-#### 4. Usage in LM Studio
-
-Chat with the model:
-
-```
-User: "Show me the call graph for generate_output"
-Model: [Calls analyze_rust_callgraph function and displays results]
-```
-
-### Qwen Code Integration
-
-Qwen Code supports tool/function calling similar to OpenAI's format.
-
-#### 1. Start morpho-rs-agent
-
-```bash
-./target/release/morpho-rs-agent
-```
-
-#### 2. Create Tool Wrapper
-
-Save as `qwen-morpho-tools.py`:
-
-```python
-#!/usr/bin/env python3
-import requests
-
-MORPHO_BASE = "http://127.0.0.1:8080"
-
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "list_rust_items",
-            "description": "List all types and functions in a Rust project",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "public_only": {
-                        "type": "boolean",
-                        "description": "Only show public API items (reduces token usage)",
-                        "default": False
-                    }
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "analyze_rust_callgraph",
-            "description": "Analyze Rust code to show which functions are called by a given function, with hierarchical tree visualization",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "function": {
-                        "type": "string",
-                        "description": "The function to analyze (e.g., './src/lib.rs::generate_output' or 'generate_output')"
-                    },
-                    "public_only": {
-                        "type": "boolean",
-                        "description": "Only show public API functions",
-                        "default": False
-                    }
-                },
-                "required": ["function"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_rust_source",
-            "description": "Get the formatted source code of a Rust function",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "function": {
-                        "type": "string",
-                        "description": "Function name to retrieve source for"
-                    }
-                },
-                "required": ["function"]
-            }
-        }
-    }
-]
-
-def call_tool(tool_name, arguments):
-    if tool_name == "list_rust_items":
-        resp = requests.post(
-            f"{MORPHO_BASE}/tool/list_all",
-            json={"public_only": arguments.get("public_only", False)}
-        )
-        return resp.json()["result"]
-    elif tool_name == "analyze_rust_callgraph":
-        resp = requests.post(
-            f"{MORPHO_BASE}/tool/generate_call_graph",
-            json={
-                "root_function": arguments["function"],
-                "public_only": arguments.get("public_only", False)
-            }
-        )
-        return resp.json()["result"]
-    elif tool_name == "get_rust_source":
-        resp = requests.post(
-            f"{MORPHO_BASE}/tool/get_source",
-            json={"function": arguments["function"]}
-        )
-        return resp.json()["result"]
-
-# Example usage with Qwen API
-from openai import OpenAI
-
-client = OpenAI(
-    base_url="http://localhost:1234/v1",  # Qwen local server
-    api_key="not-needed"
-)
-
-messages = [
-    {"role": "user", "content": "Analyze the call graph for generate_output in the current Rust project"}
-]
-
-response = client.chat.completions.create(
-    model="qwen-coder",
-    messages=messages,
-    tools=tools,
-    tool_choice="auto"
-)
-
-# Handle tool calls
-if response.choices[0].message.tool_calls:
-    for tool_call in response.choices[0].message.tool_calls:
-        result = call_tool(
-            tool_call.function.name,
-            eval(tool_call.function.arguments)
-        )
-        print(result)
-```
-
-#### 3. Run with Qwen
-
-```bash
-python qwen-morpho-tools.py
-```
+See the [API Endpoints](#api-endpoints) section for request/response formats.
 
 ## Use Cases
 
@@ -618,6 +466,58 @@ morpho-rs-cli /path/to/project "./src/auth.rs::validate_token"
 morpho-rs-cli /path/to/project "validate_config" --source
 ```
 
+### 6. Multi-Project Analysis (Agent Only)
+
+The HTTP agent supports analyzing multiple directories simultaneously:
+
+```bash
+# Start agent with main project + local dependencies
+morpho-rs-agent /path/to/main/project /path/to/local/dep1 /path/to/local/dep2
+
+# Now you can trace calls across crate boundaries
+# For example, see how your main project calls into dependency code
+curl -X POST http://127.0.0.1:8080/tool/generate_call_graph \
+  -H "Content-Type: application/json" \
+  -d '{"root_function": "./main/src/lib.rs::process_data"}'
+
+# The call graph will show calls into functions from all three directories
+
+# Check which projects are available
+curl http://127.0.0.1:8080/info
+
+# Filter to just one codebase using short name
+curl -X POST http://127.0.0.1:8080/tool/list_all \
+  -H "Content-Type: application/json" \
+  -d '{"public_only": true, "directory": "sio"}'
+
+# Filter to a specific subdirectory
+curl -X POST http://127.0.0.1:8080/tool/list_all \
+  -H "Content-Type: application/json" \
+  -d '{"public_only": true, "directory": "gpui-component/crates/ui/src/button"}'
+
+# This will only show items from the button subdirectory
+```
+
+**Directory Filtering with Short Names and Subdirectories:**
+
+The agent automatically extracts short names from directory paths (e.g., `/Users/rivergod/dev/sio` → `sio`). You can:
+1. Call `GET /info` to see the primary project and all dependencies with their short names
+2. Use short names for entire projects: `"directory": "gpui-component"`
+3. Use subdirectory paths: `"directory": "gpui-component/crates/ui/src/button"`
+4. Or use full paths if preferred: `"directory": "/Users/rivergod/dev/gpui-component"`
+
+Benefits:
+- **Without `directory`** - Returns results from all configured directories (may be noisy)
+- **With project name** - Returns results only from that project (e.g., `"gpui-component"`)
+- **With subdirectory** - Returns results only from that subdirectory (e.g., `"gpui-component/crates/ui"`)
+- **Short names** - More readable and portable than full paths
+
+This is especially useful for:
+- **Workspace analysis** - Analyze all workspace members together
+- **Local dependencies** - Include git submodules or path dependencies
+- **Cross-crate refactoring** - Understand impact across multiple crates
+- **Focused queries** - Filter to specific codebase to reduce token usage
+
 ## Workflow Example
 
 Here's a complete workflow for understanding and modifying code:
@@ -642,6 +542,46 @@ morpho-rs-cli . "./src/lib.rs::generate_list_all" --source
 ```
 
 ## Advanced Features
+
+### Blacklist Filtering
+
+Exclude specific directories or paths from analysis to reduce noise and improve performance:
+
+```bash
+# Exclude common directories
+morpho-rs-cli . --blacklist target,tests,benches,examples
+
+# Exclude generated code
+morpho-rs-cli . --blacklist target,build,generated
+
+# Works with all modes
+morpho-rs-cli . "main" --blacklist target
+morpho-rs-cli . "main" --source --blacklist tests,benches
+```
+
+**Use Cases:**
+- **Skip build artifacts**: `target` directory
+- **Ignore test code**: `tests`, `benches`
+- **Exclude examples**: `examples`
+- **Skip generated code**: `build`, `generated`, `proto`
+- **Ignore vendor code**: `vendor`, `third_party`
+
+**How it works:**
+- Blacklist uses substring matching on file paths
+- Applies to both directories and individual files
+- Multiple paths separated by commas
+- Case-sensitive matching
+
+**Example:**
+```bash
+# Before (with tests included)
+morpho-rs-cli . | wc -l
+1500 lines
+
+# After (tests excluded)
+morpho-rs-cli . --blacklist tests | wc -l
+800 lines  # 47% reduction!
+```
 
 ### Fully Qualified Names
 
